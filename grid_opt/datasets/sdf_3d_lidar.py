@@ -34,7 +34,10 @@ class PosedSdf3DLidar(SubmapDataset):
         max_z = 60.0,
         min_range=1.5, 
         max_range=60.0,
-        adaptive_range=True
+        adaptive_range=True,
+        pose_format="kitti",
+        match_pcd_by_tum_stamp=False,
+        selected_stamps=None
     ):
 
         super().__init__()
@@ -55,20 +58,78 @@ class PosedSdf3DLidar(SubmapDataset):
         self.max_z = max_z
         self.min_range = min_range
         self.max_range = max_range
+        self.pose_format = pose_format
+        self.match_pcd_by_tum_stamp = match_pcd_by_tum_stamp
+        self.selected_stamps = selected_stamps
 
         # 1) Read pose files
-        self.pose_list_gt = self.read_poses(pose_file_gt)
-        self.pose_list_init = self.read_poses(pose_file_init)
+        self.pose_stamps_gt = None
+        self.pose_stamps_init = None
+        if self.pose_format == "tum":
+            self.pose_list_gt, self.pose_stamps_gt = self.read_tum_poses(pose_file_gt)
+            self.pose_list_init, self.pose_stamps_init = self.read_tum_poses(pose_file_init)
+        elif self.pose_format == "kitti":
+            self.pose_list_gt = self.read_poses(pose_file_gt)
+            self.pose_list_init = self.read_poses(pose_file_init)
+        else:
+            raise ValueError(f"Unknown pose_format: {self.pose_format}")
+
         num_poses = min(len(self.pose_list_gt), len(self.pose_list_init))
         self.pose_list_gt = self.pose_list_gt[:num_poses]
         self.pose_list_init = self.pose_list_init[:num_poses]
+        if self.pose_stamps_gt is not None:
+            self.pose_stamps_gt = self.pose_stamps_gt[:num_poses]
+        if self.pose_stamps_init is not None:
+            self.pose_stamps_init = self.pose_stamps_init[:num_poses]
         logger.info(f"Read {num_poses} poses from files.")
 
         # 2) Collect all .pcd (or .ply) files in the given folder
-        pcd_files = sorted([f for f in os.listdir(lidar_folder) if f.endswith('.pcd') or f.endswith('.ply')])
+        pcd_files_all = sorted([f for f in os.listdir(lidar_folder) if f.endswith('.pcd') or f.endswith('.ply')])
+        if self.match_pcd_by_tum_stamp:
+            if self.pose_format != "tum":
+                raise ValueError("match_pcd_by_tum_stamp requires pose_format='tum'.")
+            pcd_by_stem = {os.path.splitext(f)[0]: f for f in pcd_files_all}
+            pose_gt_by_stamp = dict(zip(self.pose_stamps_gt, self.pose_list_gt))
+            pose_init_by_stamp = dict(zip(self.pose_stamps_init, self.pose_list_init))
+            pcd_files = []
+            matched_gt = []
+            matched_init = []
+            matched_stamps_gt = []
+            matched_stamps_init = []
+            missing_reported = 0
+            stamps_to_match = self.selected_stamps if self.selected_stamps is not None else self.pose_stamps_init
+            for stamp in stamps_to_match:
+                pcd_name = pcd_by_stem.get(stamp)
+                pose_gt = pose_gt_by_stamp.get(stamp)
+                pose_init = pose_init_by_stamp.get(stamp)
+                if pcd_name is None or pose_gt is None or pose_init is None:
+                    if missing_reported < 20:
+                        logger.warning(f"Pose stamp has no exact PCD match: {stamp}")
+                    missing_reported += 1
+                    continue
+                pcd_files.append(pcd_name)
+                matched_gt.append(pose_gt)
+                matched_init.append(pose_init)
+                matched_stamps_gt.append(stamp)
+                matched_stamps_init.append(stamp)
+            if missing_reported > 20:
+                logger.warning(f"{missing_reported - 20} additional missing exact PCD matches were omitted.")
+            self.pose_list_gt = matched_gt
+            self.pose_list_init = matched_init
+            self.pose_stamps_gt = matched_stamps_gt
+            self.pose_stamps_init = matched_stamps_init
+        else:
+            pcd_files = pcd_files_all
+
         # If num_frames is specified and smaller than total .pcd files, truncate the list
         if num_frames is not None and num_frames < len(pcd_files):
             pcd_files = pcd_files[:num_frames]
+            self.pose_list_gt = self.pose_list_gt[:num_frames]
+            self.pose_list_init = self.pose_list_init[:num_frames]
+            if self.pose_stamps_gt is not None:
+                self.pose_stamps_gt = self.pose_stamps_gt[:num_frames]
+            if self.pose_stamps_init is not None:
+                self.pose_stamps_init = self.pose_stamps_init[:num_frames]
 
         # number of pose lines or number of .pcd files
         n_usable = min(len(self.pose_list_gt), len(pcd_files))
@@ -190,6 +251,38 @@ class PosedSdf3DLidar(SubmapDataset):
             pose_list.append((R, t))
         print(f"Read {len(pose_list)} poses from file:", pose_file)
         return pose_list
+
+    def read_tum_poses(self, pose_file):
+        pose_list = []
+        stamps = []
+        with open(pose_file, 'r') as file:
+            for line_number, line in enumerate(file, start=1):
+                line = line.strip()
+                if not line or line.startswith('#'):
+                    continue
+                values = line.split()
+                if len(values) < 8:
+                    logger.warning(f"Skipping malformed TUM line {line_number}: {line}")
+                    continue
+                stamp = values[0]
+                tx, ty, tz, qx, qy, qz, qw = [float(v) for v in values[1:8]]
+                q = np.array([qw, qx, qy, qz], dtype=np.float64)
+                q_norm = np.linalg.norm(q)
+                if not np.isfinite(q_norm) or q_norm < 1e-12:
+                    logger.warning(f"Skipping TUM line {line_number} with invalid quaternion.")
+                    continue
+                q = q / q_norm
+                qw, qx, qy, qz = q
+                R = np.array([
+                    [1.0 - 2.0 * (qy * qy + qz * qz), 2.0 * (qx * qy - qz * qw), 2.0 * (qx * qz + qy * qw)],
+                    [2.0 * (qx * qy + qz * qw), 1.0 - 2.0 * (qx * qx + qz * qz), 2.0 * (qy * qz - qx * qw)],
+                    [2.0 * (qx * qz - qy * qw), 2.0 * (qy * qz + qx * qw), 1.0 - 2.0 * (qx * qx + qy * qy)]
+                ], dtype=np.float32)
+                t = np.array([[tx], [ty], [tz]], dtype=np.float32)
+                stamps.append(stamp)
+                pose_list.append((R, t))
+        print(f"Read {len(pose_list)} TUM poses from file:", pose_file)
+        return pose_list, stamps
     
     def get_odometry_at_pose(self, src_id):
         """ Obtain the odometry from src_id to src_id+1.
