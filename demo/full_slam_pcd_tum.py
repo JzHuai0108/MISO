@@ -172,11 +172,22 @@ def optimized_pose_map(stamps, grid_atlas):
 def read_keyframe_csv(filename):
     stamps = []
     with open(filename, newline='') as file:
-        reader = csv.DictReader(file)
-        if 'timestamp' not in reader.fieldnames:
-            raise ValueError(f'{filename} does not have a timestamp column.')
-        for row in reader:
-            stamps.append(row['timestamp'])
+        sample = file.readline()
+        file.seek(0)
+        if 'timestamp' in sample:
+            reader = csv.DictReader(file)
+            for row in reader:
+                stamps.append(row['timestamp'])
+        else:
+            reader = csv.reader(file)
+            for row in reader:
+                if not row:
+                    continue
+                # BLSS/KVORG keyframe_index_to_input_index.csv has no header:
+                # keyframe_index,input_index,timestamp
+                if len(row) < 3:
+                    raise ValueError(f'{filename} has a malformed keyframe row: {row}')
+                stamps.append(row[2])
     return stamps
 
 
@@ -248,26 +259,32 @@ def propagate_all_frame_poses(all_stamps, all_init_poses, selected_stamps, selec
     return propagated
 
 
-def create_dataset(cfg, selected_stamps, voxel_size, near_surf_std, n_near, n_free, n_behind, frame_samples, frame_batchsize):
+def dataset_option(cfg, profile, key, default):
+    dataset_cfg = cfg.get('dataset', {})
+    profile_cfg = dataset_cfg.get(profile, {})
+    return profile_cfg.get(key, dataset_cfg.get(key, default))
+
+
+def create_dataset(cfg, selected_stamps, profile):
     return PosedSdf3DLidar(
         lidar_folder=cfg['dataset']['path'],
         pose_file_gt=cfg['dataset']['pose_gt'],
         pose_file_init=cfg['dataset']['pose_init'],
         num_frames=cfg['dataset']['num_frames'],
         trunc_dist=cfg['dataset']['trunc_dist'],
-        frame_samples=frame_samples,
-        frame_batchsize=frame_batchsize,
-        voxel_size=voxel_size,
-        near_surface_std=near_surf_std,
-        near_surface_n=n_near,
-        free_space_n=n_free,
-        behind_surface_n=n_behind,
-        min_dist_ratio=0.50,
-        min_z=-10.0,
-        max_z=60.0,
-        min_range=1.5,
-        max_range=60.0,
-        adaptive_range=False,
+        frame_samples=dataset_option(cfg, profile, 'frame_samples', 2**20 if profile == 'tracking' else 2**12),
+        frame_batchsize=dataset_option(cfg, profile, 'frame_batchsize', 2**14 if profile == 'tracking' else 2**10),
+        voxel_size=dataset_option(cfg, profile, 'voxel_size', 0.6 if profile == 'tracking' else 0.08),
+        near_surface_std=dataset_option(cfg, profile, 'near_surface_std', 0.1 if profile == 'tracking' else 0.25),
+        near_surface_n=dataset_option(cfg, profile, 'near_surface_n', 0 if profile == 'tracking' else 4),
+        free_space_n=dataset_option(cfg, profile, 'free_space_n', 0 if profile == 'tracking' else 2),
+        behind_surface_n=dataset_option(cfg, profile, 'behind_surface_n', 0 if profile == 'tracking' else 1),
+        min_dist_ratio=dataset_option(cfg, profile, 'min_dist_ratio', 0.50),
+        min_z=dataset_option(cfg, profile, 'min_z', -10.0),
+        max_z=dataset_option(cfg, profile, 'max_z', 60.0),
+        min_range=dataset_option(cfg, profile, 'min_range', 1.5),
+        max_range=dataset_option(cfg, profile, 'max_range', 60.0),
+        adaptive_range=dataset_option(cfg, profile, 'adaptive_range', False),
         pose_format='tum',
         match_pcd_by_tum_stamp=True,
         selected_stamps=selected_stamps
@@ -311,24 +328,12 @@ def main():
     dataset_track = create_dataset(
         cfg,
         selected_stamps,
-        voxel_size=0.6,
-        near_surf_std=0.1,
-        n_near=0,
-        n_free=0,
-        n_behind=0,
-        frame_samples=2**20,
-        frame_batchsize=2**14
+        profile='tracking'
     )
     dataset_map = create_dataset(
         cfg,
         selected_stamps,
-        voxel_size=0.08,
-        near_surf_std=0.25,
-        n_near=4,
-        n_free=2,
-        n_behind=1,
-        frame_samples=2**12,
-        frame_batchsize=2**10
+        profile='mapping'
     )
 
     cfg['model']['pose']['num_poses'] = dataset_map.num_kfs

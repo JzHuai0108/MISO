@@ -1,6 +1,6 @@
 define: &truncation_dist 0.50
 define: &num_frames 1991
-define: &bound [[-5, 57], [-71, 2], [-3, 20]]  # Quad easy
+define: &bound [[-30, 30], [-30, 30], [-8, 15]]  # Hilti local submap
 define: &gm_scale_sdf 0.3  # Suggested by PIN-SLAM (0.005 * 60)
 
 model:
@@ -18,7 +18,7 @@ model:
     type: "regular"
     feature_dim: 4 
     init_stddev: 0.0  
-    bound: *bound  # nc quad
+    bound: *bound
     base_cell_size: 1
     per_level_scale: 5.0
     n_levels: 2
@@ -64,8 +64,8 @@ align:
   verbose: True
 system:
   init_odom: "external" 
-  submap_size: 200                   # number of frames in a submap
-  submap_local_bound: [[-45, 45], [-45, 45], [-5, 15]]
+  submap_size: 60                    # number of selected keyframes in a submap
+  submap_local_bound: *bound
   submap_fov_thresh: 0.0             # Create a new submap if the overlap is less than this threshold
   save_submap_mesh: False
   log_dir: "./results/default"
@@ -103,3 +103,25 @@ dataset:
   frame_samples: 5000
   frame_batchsize: 1024
   bound: *bound
+  min_dist_ratio: 0.50
+  min_z: -8.0
+  max_z: 15.0
+  min_range: 1.5
+  max_range: 60.0
+  adaptive_range: False
+  tracking:
+    voxel_size: 0.6
+    near_surface_std: 0.1
+    near_surface_n: 0
+    free_space_n: 0
+    behind_surface_n: 0
+    frame_samples: 1048576
+    frame_batchsize: 16384
+  mapping:
+    voxel_size: 0.08
+    near_surface_std: 0.25
+    near_surface_n: 4
+    free_space_n: 2
+    behind_surface_n: 1
+    frame_samples: 4096
+    frame_batchsize: 1024
